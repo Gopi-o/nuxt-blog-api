@@ -4,82 +4,147 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-app.use(cors());
-
-// Путь к db.json
+const PORT = 3001;
 const DB_PATH = path.join(__dirname, 'db.json');
 
-// Чтение данных
-function getDb() {
-  return JSON.parse(fs.readFileSync(DB_PATH));
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+const readDb = () => JSON.parse(fs.readFileSync(DB_PATH));
+const writeDb = (data) => fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+
+const getNextId = (collection) => {
+  const db = readDb()
+  if (!db[collection] || db[collection].length === 0) return 1
+  return Math.max(...db[collection].map(item => item.id)) + 1
 }
 
-// Маршрут для главной страницы
-app.get('/', (req, res) => {
-  res.send('API работает! Доступные пути: /posts');
-});
+// Обработчик для постов
+app.route('/posts')
+  .get((req, res) => {
+    try {
+      const { _sort, _order, _limit } = req.query;
+      let posts = [...readDb().posts];
 
-app.get('/posts', (req, res) => {
-  const db = getDb();
-  let result = [...db.posts];
-  
-  if (req.query._sort) {
-    const order = req.query._order === 'desc' ? -1 : 1;
-    result.sort((a, b) => (a[req.query._sort] > b[req.query._sort] ? order : -order));
-  }
-  
-  if (req.query._limit) {
-    result = result.slice(0, Number(req.query._limit));
-  }
-  
-  res.json(result);
-});
+      if (_sort) {
+        const order = _order === 'desc' ? -1 : 1;
+        posts.sort((a, b) => (a[_sort] > b[_sort] ? order : -order));
+      }
 
-app.get('/comments', (req, res) => {
-  const db = getDb();
-  let result = db.comments;
-  if (req.query.postId) {
-    result = result.filter(c => c.postId == req.query.postId);
-  }
-  res.json(result);
-});
+      if (_limit) {
+        posts = posts.slice(0, Number(_limit));
+      }
 
-app.patch('/posts/:id', (req, res) => {
-  const db = getDb()
-  const postIndex = db.posts.findIndex(p => p.id == req.params.id)
-  
-  if (postIndex === -1) {
-    return res.status(404).json({ error: 'Пост не найден' })
-  }
-  
-  db.posts[postIndex] = { ...db.posts[postIndex], ...req.body }
-  fs.writeFileSync(DB_PATH, JSON.stringify(db))
-  
-  res.json(db.posts[postIndex])
-})
+      res.json(posts);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  })
+  .post((req, res) => {
+    try {
+      const db = readDb();
+      const newId = getNextId('posts')
+      const newPost = {
+        id: newId, 
+        ...req.body,
+        createdAt: new Date().toISOString(),
+        likes: 0
+      };
+      
+      db.posts.push(newPost);
+      writeDb(db);
+      
+      res.status(201).json(newPost);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
 
-app.delete('/posts/:id', (req, res) => {
-  const db = getDb()
-  const postId = parseInt(req.params.id);
-  
-  const postIndex = db.posts.findIndex(p => p.id === postId);
-  
-  // if (postIndex === -1) {
-  //   return res.status(404).json({ error: 'Пост не найден' });
-  // }
-  
-  db.posts.splice(postIndex, 1);
-  
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
-})
+// Обработчик для одного поста
+app.route('/posts/:id')
+  .get((req, res) => {
+    try {
+      const post = readDb().posts.find(p => p.id == req.params.id);
+      post ? res.json(post) : res.status(404).json({ error: 'Post not found' });
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  })
+  .patch((req, res) => {
+    try {
+      const db = readDb();
+      const postIndex = db.posts.findIndex(p => p.id == req.params.id);
+      
+      if (postIndex === -1) {
+        return res.status(404).json({ error: 'Post not found' });
+      }
+      
+      db.posts[postIndex] = { 
+        ...db.posts[postIndex], 
+        ...req.body,
+        updatedAt: new Date().toISOString()
+      };
+      
+      writeDb(db);
+      res.json(db.posts[postIndex]);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  })
+  .delete((req, res) => {
+    try {
+      const db = readDb();
+      const initialLength = db.posts.length;
+      
+      db.posts = db.posts.filter(p => p.id != req.params.id);
+      
+      if (db.posts.length === initialLength) {
+        return res.status(404).json({ error: 'Post not found' });
+      }
+      
+      writeDb(db);
+      res.status(204).end();
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
 
-app.get('/posts/:id', (req, res) => {
-  const db = getDb();
-  const post = db.posts.find(p => p.id == req.params.id);
-  res.json(post || { error: 'Пост не найден' });
-});
+// Обработчик для комментов
+app.route('/comments')
+  .get((req, res) => {
+    try {
+      let comments = [...readDb().comments];
+      
+      if (req.query.postId) {
+        comments = comments.filter(c => c.postId == req.query.postId);
+      }
+      
+      res.json(comments);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  })
+  .post((req, res) => {
+    try {
+      const db = readDb();
+      const newId = getNextId('posts')
+      const newComment = {
+        id: newId,
+        ...req.body,
+        createdAt: new Date().toISOString()
+      };
+      
+      db.comments.push(newComment);
+      writeDb(db);
+      
+      res.status(201).json(newComment);
+    } catch (error) {
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
 
-const PORT = 3001;
+// Запуск сервера
 app.listen(PORT, () => {
-  console.log(`Сервер запущен на http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
